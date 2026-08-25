@@ -27,6 +27,7 @@ from .interview import (
     InterviewReportRequest,
     InterviewReportResponse,
     generate_next_question,
+    fallback_next_question,
     generate_interview_report,
     fallback_interview_report,
 )
@@ -157,8 +158,9 @@ async def interview_next(req: InterviewNextRequest):
             f"error={type(e).__name__}: {e}",
             flush=True,
         )
-        # Soft-fail: end the interview gracefully rather than 500-ing the client.
-        return InterviewNextResponse(question=None, kind="closing", done=True)
+        # Provider quota/network failures must not look like a legitimate end of
+        # interview. Continue with an answer-aware local follow-up instead.
+        return fallback_next_question(req)
 
 
 @app.post("/interview/report", response_model=InterviewReportResponse)

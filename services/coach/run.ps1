@@ -56,12 +56,13 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 if ($Provider -eq "auto") {
     $configuredProvider = [string]$env:LLM_PROVIDER
     $configuredProvider = $configuredProvider.Trim().ToLowerInvariant()
-    if ($configuredProvider -eq "gemini" -and $env:GOOGLE_API_KEY) { $Provider = "gemini" }
+    if ($configuredProvider -in @("ollama", "local")) { $Provider = "ollama" }
+    elseif ($configuredProvider -eq "gemini" -and $env:GOOGLE_API_KEY) { $Provider = "gemini" }
     elseif ($configuredProvider -eq "nvidia" -and $env:NVIDIA_API_KEY) { $Provider = "nvidia" }
     elseif ($configuredProvider -eq "jeonbuk" -and $env:JEONBUK_API_KEY) { $Provider = "jeonbuk" }
     elseif ($configuredProvider -eq "claude" -and $env:ANTHROPIC_API_KEY) { $Provider = "claude" }
     elseif ($configuredProvider -eq "mock") { $Provider = "mock" }
-    elseif (-not $configuredProvider -and $env:GOOGLE_API_KEY) { $Provider = "gemini" }
+    elseif (-not $configuredProvider) { $Provider = "ollama" }
     elseif (-not $configuredProvider -and $env:NVIDIA_API_KEY) { $Provider = "nvidia" }
     elseif (-not $configuredProvider -and $env:JEONBUK_API_KEY) { $Provider = "jeonbuk" }
     else { $Provider = "mock" }

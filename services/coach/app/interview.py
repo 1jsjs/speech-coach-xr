@@ -89,6 +89,8 @@ def _next_system_prompt(cfg: InterviewConfig) -> str:
 - 같은 질문이나 이미 답한 주제를 반복하지 마세요.
 - 직전 답변에서 실제로 언급한 내용 중 의미 있는 연결이나 근거가 있다면 reaction으로 짧게 확인하세요. 예: '지원 동기와 경험의 연결이 자연스럽군요.' 단, 근거 없이 칭찬하지 마세요.
 - reaction은 친구의 맞장구가 아니라 면접관의 절제된 존댓말 한 문장이어야 하며, 곧바로 이어질 질문과 내용이 중복되지 않아야 합니다.
+- 실제 대면 면접처럼 '음, 그렇군요.', '네, 그러면', '좋습니다. 다만' 같은 짧은 전환 표현을 문맥에 맞을 때만 사용하세요. 매 문장에 넣거나 같은 표현을 반복하지 말고, 당황한 듯한 '어…' 같은 군더더기는 쓰지 마세요.
+- warm은 부드러운 확인, analytical은 생각한 뒤 확인하는 말, challenging은 반론 전환 표현을 주로 사용하되 성격을 직접 언급하지 마세요.
 - 칭찬·안심 반응은 warm, 사실 확인과 꼬리 질문은 analytical, 빠른 말·시선 불안·답변의 빈틈 지적은 challenging에게 배정하세요.
 - 지원자가 말하지 않은 사실을 만들지 말고, 합격/불합격을 판정하지 마세요.
 - 무응답에는 칭찬이나 '잘 들었습니다' 같은 반응을 절대 쓰지 마세요.
@@ -162,7 +164,7 @@ def _report_user_prompt(req: InterviewReportRequest) -> str:
 
 
 def _provider() -> str:
-    return os.environ.get("LLM_PROVIDER", "gemini").lower().strip()
+    return os.environ.get("LLM_PROVIDER", "ollama").lower().strip()
 
 
 def _gemini_json(system: str, user: str, schema: type[BaseModel]):
@@ -221,12 +223,32 @@ def _nvidia_json(system: str, user: str, schema: type[BaseModel]):
     return schema.model_validate_json(raw[start : end + 1] if start >= 0 and end > start else raw)
 
 
+def _ollama_json(system: str, user: str, schema: type[BaseModel]):
+    from .llm import _ollama_chat
+
+    response = _ollama_chat(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user + "\n반드시 JSON 객체 하나만 반환하세요. Markdown 금지."},
+        ],
+        temperature=0.35,
+        max_tokens=1400,
+    )
+    raw = (response.choices[0].message.content or "").strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1].removeprefix("json").strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    return schema.model_validate_json(raw[start : end + 1] if start >= 0 and end > start else raw)
+
+
 def _route_json(system: str, user: str, schema: type[BaseModel]):
     provider = _provider()
     if provider == "jeonbuk":
         return _jeonbuk_json(system, user, schema)
     if provider in ("nvidia", "qwen"):
         return _nvidia_json(system, user, schema)
+    if provider in ("ollama", "local"):
+        return _ollama_json(system, user, schema)
     return _gemini_json(system, user, schema)
 
 
@@ -239,7 +261,8 @@ _MOCK_FOLLOWUPS = (
 )
 
 
-def _mock_next(req: InterviewNextRequest) -> InterviewNextResponse:
+def fallback_next_question(req: InterviewNextRequest) -> InterviewNextResponse:
+    """Deterministic, answer-aware continuation used by mock mode and provider outages."""
     if not req.history:
         return InterviewNextResponse(
             question=f"{req.config.job_role} 직무에 지원하신 이유와 {req.config.topic}에 대해 말씀해 주시겠습니까?",
@@ -254,15 +277,15 @@ def _mock_next(req: InterviewNextRequest) -> InterviewNextResponse:
     last_qa = req.history[-1] if req.history else QAExchange(question="", answer="")
     last = last_qa.answer.strip()
     snippet = (last[:16] + "…") if len(last) > 16 else (last or "말씀하신 내용")
-    reaction, tone, speaker = "네, 답변 감사합니다.", "warm", "warm"
+    reaction, tone, speaker = "음, 말씀하신 내용은 확인했습니다.", "neutral", "analytical"
     if not last:
         reaction, tone, speaker = "답변이 들리지 않았습니다. 짧게라도 말씀해 주세요.", "neutral", "analytical"
     elif (last_qa.wpm or 0) > 170 or last_qa.filler_count >= 4:
-        reaction, tone, speaker = "조금 더 천천히 핵심부터 말씀해 주세요.", "challenging", "challenging"
+        reaction, tone, speaker = "다만, 조금 더 천천히 핵심부터 말씀해 주세요.", "challenging", "challenging"
     elif (last_qa.gaze_ratio is not None and last_qa.gaze_ratio < 0.55) or last_qa.gaze_switches >= 7:
-        reaction, tone, speaker = "질문자를 보면서 답변을 이어가 주세요.", "challenging", "challenging"
+        reaction, tone, speaker = "음, 질문자를 보면서 답변을 이어가 주세요.", "challenging", "challenging"
     elif last and len(last) < 20:
-        reaction, tone, speaker = "조금 더 구체적으로 설명해 주시겠습니까?", "neutral", "analytical"
+        reaction, tone, speaker = "네, 그러면 조금 더 구체적으로 설명해 주시겠습니까?", "neutral", "analytical"
     question_speaker = "challenging" if kind == "pressure" else ("analytical" if kind == "followup" else "warm")
     return InterviewNextResponse(
         question=template.format(snippet=snippet),
@@ -321,7 +344,7 @@ def generate_next_question(req: InterviewNextRequest) -> InterviewNextResponse:
     if req.asked_count >= req.max_questions:
         return InterviewNextResponse(question=None, kind="closing", done=True)
     if _provider() == "mock":
-        return _mock_next(req)
+        return fallback_next_question(req)
     result: InterviewNextResponse = _route_json(_next_system_prompt(req.config), _next_user_prompt(req), InterviewNextResponse)
     result.done = False
     if not result.question or not result.question.strip():

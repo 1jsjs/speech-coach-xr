@@ -370,9 +370,30 @@ def _generate_with_nvidia(req: AgentTriggerRequest) -> AgentFeedbackResponse:
     return AgentFeedbackResponse.model_validate_json(raw[start : end + 1] if start >= 0 and end > start else raw)
 
 
+def _generate_with_ollama(req: AgentTriggerRequest) -> AgentFeedbackResponse:
+    from .llm import _ollama_chat
+
+    json_contract = (
+        '\n\n반드시 다음 JSON 형식으로만 응답하세요. Markdown 금지:\n'
+        '{"message": "한 줄 코칭 한국어 텍스트 또는 null", '
+        '"tone": "praise" | "nudge" | "critique" | null}'
+    )
+    response = _ollama_chat(
+        [
+            {"role": "system", "content": _system_prompt(req)},
+            {"role": "user", "content": _user_prompt(req) + json_contract},
+        ],
+        temperature=0.5,
+        max_tokens=220,
+    )
+    raw = (response.choices[0].message.content or "").strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    return AgentFeedbackResponse.model_validate_json(raw[start : end + 1] if start >= 0 and end > start else raw)
+
+
 def generate_agent_feedback(req: AgentTriggerRequest) -> AgentFeedbackResponse:
     """Provider-routed agent feedback. Caller wraps in try/except."""
-    provider = os.environ.get("LLM_PROVIDER", "gemini").lower().strip()
+    provider = os.environ.get("LLM_PROVIDER", "ollama").lower().strip()
     if provider == "mock":
         messages = {
             "silence": ("잠시 생각을 정리한 뒤 이어서 말씀해 주세요.", "nudge"),
@@ -390,6 +411,8 @@ def generate_agent_feedback(req: AgentTriggerRequest) -> AgentFeedbackResponse:
         result = _generate_with_jeonbuk(req)
     elif provider in ("nvidia", "qwen"):
         result = _generate_with_nvidia(req)
+    elif provider in ("ollama", "local"):
+        result = _generate_with_ollama(req)
     else:
         result = _generate_with_gemini(req)
     # Trim — models occasionally return "  하세요. " with trailing whitespace.

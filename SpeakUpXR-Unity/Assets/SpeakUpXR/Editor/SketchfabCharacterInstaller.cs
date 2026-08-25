@@ -15,22 +15,26 @@ using UnityEngine.Rendering;
 public static class SketchfabCharacterInstaller
 {
     private const string ScenePath = "Assets/SpeakUpXR/Scenes/Interview.unity";
-    private const string InstallMarkerPath = "Assets/ThirdParty/Sketchfab/characters-installed-v1.txt";
+    private const string InstallMarkerPath = "Assets/ThirdParty/Sketchfab/rigged-characters-installed-v3.txt";
+    private const string ValidationReportPath = "Assets/SpeakUpXR/UI/rigged-interviewer-validation-v1.txt";
 
     private static readonly CharacterSpec[] Characters =
     {
         new(
             "warm",
-            "Assets/ThirdParty/Sketchfab/BusinessmanGreySuit/source/Businessman in a Grey Suit.glb",
-            "BusinessmanGreySuit_Warm"),
+            "Assets/ThirdParty/Sketchfab/RiggedInterviewers/BusinesswomanGreySuitTablet_Rigged.fbx",
+            "BusinesswomanGreySuitTablet_HR",
+            "ko-KR-SunHiNeural"),
         new(
             "analytical",
-            "Assets/ThirdParty/Sketchfab/CorporateWalkGraySuit/source/model.glb",
-            "CorporateWalkGraySuit_Analytical"),
+            "Assets/ThirdParty/Sketchfab/RiggedInterviewers/BusinessmanGreySuit_Rigged.fbx",
+            "BusinessmanGreySuit_Technical",
+            "ko-KR-InJoonNeural"),
         new(
             "challenging",
-            "Assets/ThirdParty/Sketchfab/BusinessmanIdBadge/source/Businessman with ID badge.glb",
-            "BusinessmanIdBadge_Challenging")
+            "Assets/ThirdParty/Sketchfab/RiggedInterviewers/CorporateWalkGraySuit_Rigged.fbx",
+            "CorporateWalkGraySuit_Executive",
+            "ko-KR-HyunsuMultilingualNeural")
     };
 
     [InitializeOnLoadMethod]
@@ -49,7 +53,7 @@ public static class SketchfabCharacterInstaller
                 PlaceDownloadedCharacters();
                 System.IO.File.WriteAllText(
                     InstallMarkerPath,
-                    "The three Sketchfab interviewers were placed in Interview.unity at editor import time.\n");
+                    "The three Blender-rigged Sketchfab interviewers were imported as Unity Humanoids and saved in Interview.unity.\n");
                 AssetDatabase.ImportAsset(InstallMarkerPath);
             }
             catch (Exception exception)
@@ -62,6 +66,8 @@ public static class SketchfabCharacterInstaller
     [MenuItem("SpeakUpXR/Place Downloaded Sketchfab Interviewers")]
     public static void PlaceDownloadedCharacters()
     {
+        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+        foreach (var spec in Characters) ConfigureHumanoidImporter(spec.AssetPath);
         AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
         var scene = EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
         var controllers = UnityEngine.Object.FindObjectsByType<InterviewerController>(
@@ -79,6 +85,9 @@ public static class SketchfabCharacterInstaller
                 continue;
             }
 
+            var previousController = controller.CharacterAnimator
+                ? controller.CharacterAnimator.runtimeAnimatorController
+                : null;
             if (controller.AvatarRoot)
                 UnityEngine.Object.DestroyImmediate(controller.AvatarRoot);
 
@@ -94,17 +103,34 @@ public static class SketchfabCharacterInstaller
             character.transform.localRotation = Quaternion.identity;
             character.transform.localScale = Vector3.one;
 
-            CreateSeatedMeshAssets(character, spec.SceneName);
-            // These source meshes are standing, unrigged scans. Sink the lower legs
-            // below the floor/desk so their eye level and silhouette read as seated.
-            // A true seated pose still requires a rigged replacement or auto-rigging.
-            NormalizeHeightAndFloor(character, 1.76f, -0.28f);
+            NormalizeHeightAndFloor(character, 1.76f, 0f);
             ConfigureRenderers(character);
-            var mouth = CreateMouthProxy(character);
+            var animator = character.GetComponentInChildren<Animator>(true);
+            if (!animator || !animator.avatar || !animator.avatar.isValid || !animator.avatar.isHuman)
+            {
+                UnityEngine.Object.DestroyImmediate(character);
+                failures.Add($"{spec.PersonaId}: imported Avatar is not a valid Unity Humanoid ({spec.AssetPath})");
+                continue;
+            }
+            animator.runtimeAnimatorController = previousController;
+            animator.applyRootMotion = false;
+            animator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
+
+            var tracker = animator.GetComponent<InterviewerHeadTracker>() ??
+                          animator.gameObject.AddComponent<InterviewerHeadTracker>();
+            tracker.Animator = animator;
+            tracker.Target = controller.LookTarget;
+            tracker.AvatarFacingRoot = character.transform;
+            tracker.LockEveryFrame = true;
+            tracker.Rebind();
 
             controller.AvatarRoot = character;
-            controller.PlaceholderMouth = mouth;
+            controller.CharacterAnimator = animator;
+            controller.PlaceholderMouth = null;
+            controller.Voice.VoiceName = spec.VoiceName;
             EditorUtility.SetDirty(controller);
+            EditorUtility.SetDirty(animator);
+            EditorUtility.SetDirty(tracker);
         }
 
         if (failures.Count > 0)
@@ -113,7 +139,56 @@ public static class SketchfabCharacterInstaller
         EditorSceneManager.MarkSceneDirty(scene);
         EditorSceneManager.SaveScene(scene);
         AssetDatabase.SaveAssets();
-        Debug.Log("[SpeakUpXR] Three Sketchfab interviewers were placed and saved directly in Interview.unity.");
+        WriteValidationReport(controllers);
+        Debug.Log("[SpeakUpXR] Three Blender-rigged Sketchfab interviewers were imported as Humanoids, placed, and saved directly in Interview.unity.");
+    }
+
+    private static void WriteValidationReport(IEnumerable<InterviewerController> controllers)
+    {
+        var lines = new List<string>
+        {
+            "SpeakUpXR rigged interviewer validation",
+            "Scene-authored characters: 3; runtime character spawning: disabled",
+        };
+        foreach (var controller in controllers.OrderBy(value => value.PersonaId))
+        {
+            if (!controller || !controller.AvatarRoot || !controller.CharacterAnimator)
+                throw new InvalidOperationException("Interviewer scene wiring is incomplete after rigged-character installation.");
+            var animator = controller.CharacterAnimator;
+            var skins = controller.AvatarRoot.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+            var tracker = animator.GetComponent<InterviewerHeadTracker>();
+            string sourcePath = PrefabUtility.GetPrefabAssetPathOfNearestInstanceRoot(controller.AvatarRoot);
+            bool valid = animator.avatar && animator.avatar.isValid && animator.avatar.isHuman &&
+                         animator.runtimeAnimatorController && tracker && tracker.Target &&
+                         skins.Length > 0 && skins.All(renderer => renderer.bones.Length >= 15);
+            if (!valid)
+                throw new InvalidOperationException($"Rigged interviewer validation failed for {controller.PersonaId}.");
+            lines.Add(
+                $"{controller.PersonaId}: {controller.AvatarRoot.name} | Humanoid=true | " +
+                $"SkinnedMeshes={skins.Length} | HeadTracker=true | Voice={controller.Voice.VoiceName} | Source={sourcePath}");
+        }
+
+        System.IO.File.WriteAllLines(ValidationReportPath, lines);
+        AssetDatabase.ImportAsset(ValidationReportPath);
+    }
+
+    private static void ConfigureHumanoidImporter(string assetPath)
+    {
+        if (AssetImporter.GetAtPath(assetPath) is not ModelImporter importer)
+            throw new InvalidOperationException("Rigged FBX was not imported as a model: " + assetPath);
+
+        importer.animationType = ModelImporterAnimationType.Human;
+        importer.avatarSetup = ModelImporterAvatarSetup.CreateFromThisModel;
+        importer.importAnimation = false;
+        importer.optimizeGameObjects = false;
+        importer.importBlendShapes = true;
+        importer.meshCompression = ModelImporterMeshCompression.Low;
+        importer.SaveAndReimport();
+
+        var model = AssetDatabase.LoadAssetAtPath<GameObject>(assetPath);
+        var animator = model ? model.GetComponentInChildren<Animator>(true) : null;
+        if (!animator || !animator.avatar || !animator.avatar.isValid || !animator.avatar.isHuman)
+            throw new InvalidOperationException("Unity could not create a valid Humanoid Avatar for " + assetPath);
     }
 
     private static void CreateSeatedMeshAssets(GameObject character, string sceneName)
@@ -274,12 +349,14 @@ public static class SketchfabCharacterInstaller
         public readonly string PersonaId;
         public readonly string AssetPath;
         public readonly string SceneName;
+        public readonly string VoiceName;
 
-        public CharacterSpec(string personaId, string assetPath, string sceneName)
+        public CharacterSpec(string personaId, string assetPath, string sceneName, string voiceName)
         {
             PersonaId = personaId;
             AssetPath = assetPath;
             SceneName = sceneName;
+            VoiceName = voiceName;
         }
     }
 }

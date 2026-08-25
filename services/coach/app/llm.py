@@ -442,7 +442,7 @@ TrainingPrescription 형식: {"title": string, "addresses": string, "steps": str
 """
 
 
-# --------- Gemini (default) ----------
+# --------- Gemini (optional hosted provider) ----------
 
 _gemini_client = None
 
@@ -627,6 +627,55 @@ def generate_with_nvidia(bundle: SessionBundle) -> ComprehensiveReport:
     return _backfill_from_bundle(parsed, bundle)
 
 
+# --------- Ollama / local Qwen (unmetered default) ----------
+
+_ollama_client = None
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
+OLLAMA_CHAT_MODEL = os.environ.get("OLLAMA_CHAT_MODEL", "qwen3.5:4b")
+
+
+def _get_ollama():
+    global _ollama_client
+    if _ollama_client is None:
+        from openai import OpenAI
+
+        _ollama_client = OpenAI(base_url=OLLAMA_BASE_URL, api_key="ollama", timeout=120.0)
+    return _ollama_client
+
+
+def _ollama_chat(
+    messages: list[dict],
+    *,
+    temperature: float = 0.2,
+    max_tokens: int = 4000,
+):
+    """Run the interview brain locally with no request quota or API key."""
+    return _get_ollama().chat.completions.create(
+        model=OLLAMA_CHAT_MODEL,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        top_p=0.9,
+        response_format={"type": "json_object"},
+    )
+
+
+def generate_with_ollama(bundle: SessionBundle) -> ComprehensiveReport:
+    response = _ollama_chat(
+        [
+            {"role": "system", "content": _compose_system_prompt(bundle.scenario)},
+            {"role": "user", "content": f"{_user_payload(bundle)}\n\n{JEONBUK_JSON_CONTRACT}"},
+        ],
+        temperature=0.0,
+        max_tokens=6000,
+    )
+    content = response.choices[0].message.content or ""
+    parsed = _parse_report_text(content)
+    if not parsed.session_id:
+        parsed.session_id = bundle.session_id
+    return _backfill_from_bundle(parsed, bundle)
+
+
 # --------- Jeonbuk AI student API (OpenAI-compatible) ----------
 
 _jeonbuk_client = None
@@ -724,7 +773,7 @@ def generate_with_jeonbuk(bundle: SessionBundle) -> ComprehensiveReport:
 
 # --------- Dispatcher ----------
 
-PROVIDER = os.environ.get("LLM_PROVIDER", "gemini").lower()
+PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()
 
 
 def generate(bundle: SessionBundle) -> ComprehensiveReport:
@@ -736,6 +785,8 @@ def generate(bundle: SessionBundle) -> ComprehensiveReport:
         return generate_with_jeonbuk(bundle)
     if PROVIDER in ("nvidia", "qwen"):
         return generate_with_nvidia(bundle)
+    if PROVIDER in ("ollama", "local"):
+        return generate_with_ollama(bundle)
     raise RuntimeError(f"unknown LLM_PROVIDER: {PROVIDER!r}")
 
 
@@ -748,4 +799,6 @@ def provider_info() -> dict:
         return {"provider": "jeonbuk", "model": JEONBUK_CHAT_MODEL, "base_url": JEONBUK_BASE_URL}
     if PROVIDER in ("nvidia", "qwen"):
         return {"provider": "nvidia-nim", "model": NVIDIA_CHAT_MODEL, "base_url": NVIDIA_BASE_URL}
+    if PROVIDER in ("ollama", "local"):
+        return {"provider": "ollama-local", "model": OLLAMA_CHAT_MODEL, "base_url": OLLAMA_BASE_URL}
     return {"provider": "gemini", "model": GEMINI_MODEL}

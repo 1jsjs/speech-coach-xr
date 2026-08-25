@@ -23,18 +23,24 @@ public static class InterviewerLabelRepair
     }
 
     [MenuItem("SpeakUpXR/Repair Interviewer Labels")]
-    public static void RepairNow() => Repair(openScene: true);
+    public static void RepairNow()
+    {
+        Repair(openScene: true);
+    }
 
     private static void RepairIfNeeded()
     {
         if (EditorApplication.isCompiling || EditorApplication.isUpdating ||
-            EditorApplication.isPlayingOrWillChangePlaymode) return;
+            EditorApplication.isPlayingOrWillChangePlaymode)
+            return;
+
         Repair(openScene: SceneManager.GetActiveScene().path != ScenePath);
     }
 
     private static void Repair(bool openScene)
     {
         if (openScene) EditorSceneManager.OpenScene(ScenePath, OpenSceneMode.Single);
+
         var interviewers = UnityEngine.Object.FindObjectsByType<InterviewerController>(
             FindObjectsInactive.Include, FindObjectsSortMode.None);
         bool changed = false;
@@ -46,18 +52,44 @@ public static class InterviewerLabelRepair
             EditorUtility.SetDirty(interviewer);
             changed = true;
         }
+
         var nameplates = UnityEngine.Object.FindObjectsByType<Canvas>(
             FindObjectsInactive.Include, FindObjectsSortMode.None)
             .Where(canvas => canvas.name.StartsWith("NamePlate_", StringComparison.Ordinal));
         foreach (var nameplate in nameplates)
         {
-            string label = LabelFor(ClosestPersona(nameplate.transform, interviewers));
-            if (nameplate.name != "NamePlate_" + label) { nameplate.name = "NamePlate_" + label; changed = true; }
-            if (nameplate.transform.localRotation != Quaternion.identity) { nameplate.transform.localRotation = Quaternion.identity; changed = true; }
+            string personaId = ClosestPersona(nameplate.transform, interviewers);
+            string label = LabelFor(personaId);
+            if (nameplate.name != "NamePlate_" + label)
+            {
+                nameplate.name = "NamePlate_" + label;
+                changed = true;
+            }
+            var entrance = UnityEngine.Object.FindFirstObjectByType<InterviewEntranceSequence>(FindObjectsInactive.Include);
+            if (entrance && entrance.SeatPoint)
+            {
+                Vector3 awayFromSeat = nameplate.transform.position - entrance.SeatPoint.position;
+                awayFromSeat.y = 0f;
+                if (awayFromSeat.sqrMagnitude > 0.001f)
+                {
+                    Quaternion readableRotation = Quaternion.LookRotation(awayFromSeat.normalized, Vector3.up);
+                    if (Quaternion.Angle(nameplate.transform.rotation, readableRotation) > 0.1f)
+                    {
+                        nameplate.transform.rotation = readableRotation;
+                        changed = true;
+                    }
+                }
+            }
             var text = nameplate.GetComponentInChildren<Text>(true);
-            if (text && text.text != label) { text.text = label; EditorUtility.SetDirty(text); changed = true; }
+            if (text && text.text != label)
+            {
+                text.text = label;
+                EditorUtility.SetDirty(text);
+                changed = true;
+            }
             EditorUtility.SetDirty(nameplate.transform);
         }
+
         if (!changed) return;
         EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
         EditorSceneManager.SaveScene(SceneManager.GetActiveScene());
@@ -68,9 +100,14 @@ public static class InterviewerLabelRepair
     private static string ClosestPersona(Transform nameplate, InterviewerController[] interviewers)
     {
         if (interviewers.Length == 0) return "warm";
-        return interviewers.OrderBy(value => Mathf.Abs(value.transform.position.x - nameplate.position.x)).First().PersonaId;
+        return interviewers
+            .OrderBy(interviewer => Mathf.Abs(interviewer.transform.position.x - nameplate.position.x))
+            .First().PersonaId;
     }
 
-    private static string LabelFor(string personaId) => personaId == "analytical" ? "기술 면접관" :
-        personaId == "challenging" ? "임원 면접관" : "인사 면접관";
+    private static string LabelFor(string personaId)
+    {
+        return personaId == "analytical" ? "기술 면접관" :
+            personaId == "challenging" ? "임원 면접관" : "인사 면접관";
+    }
 }

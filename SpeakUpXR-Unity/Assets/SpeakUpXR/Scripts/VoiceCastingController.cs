@@ -12,7 +12,7 @@ namespace SpeakUpXR
     }
 
     /// <summary>
-    /// Auditions natural multilingual voices and applies three distinct male voices.
+    /// Auditions natural multilingual voices and applies a female HR voice plus two distinct male voices.
     /// The custom Inspector exposes one-click sample playback during Play Mode.
     /// </summary>
     public class VoiceCastingController : MonoBehaviour
@@ -36,6 +36,8 @@ namespace SpeakUpXR
         };
 
         [Header("Selected cast")]
+        public bool UseFemaleHr = true;
+        public int HrFemaleIndex;
         public int HrMaleIndex;
         public int TechnicalMaleIndex = 1;
         public int ExecutiveMaleIndex = 2;
@@ -62,7 +64,9 @@ namespace SpeakUpXR
                 if (!member) continue;
                 VoiceCandidate selected = member.PersonaId switch
                 {
-                    "warm" => At(MaleCandidates, HrMaleIndex),
+                    "warm" => UseFemaleHr
+                        ? At(FemaleCandidates, HrFemaleIndex)
+                        : At(MaleCandidates, HrMaleIndex),
                     "analytical" => At(MaleCandidates, TechnicalMaleIndex),
                     _ => At(MaleCandidates, ExecutiveMaleIndex),
                 };

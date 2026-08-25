@@ -5,7 +5,7 @@
 ## 플레이 흐름
 
 1. 문 앞에서 시작해 문이 열리고 지원자석까지 이동한다.
-2. 인사 면접관이 인사와 첫 질문을 한다.
+2. 따뜻한 인사 담당이 인사와 첫 질문을 한다.
 3. Quest 오른쪽 컨트롤러 트리거/A 버튼으로 답변을 끝낸다. 에디터에서는 Enter로 모의 답변을 넣는다.
 4. 답변 WAV를 `audio-pipeline:8000/analyze`로 보내 STT, WPM, 필러를 얻고 HMD 방향으로 질문자 응시를 근사한다.
 5. `coach:8002/interview/next`가 짧은 반응과 후속 질문, 각각의 담당 면접관을 고른다.
@@ -24,9 +24,9 @@
 
 | 슬롯 | 성격 | Azure 한국어 음성 | 조절 |
 |---|---|---|---|
-| 1 | 인사 면접관 | `ko-KR-SunHiNeural` | rate -4%, pitch +2% |
-| 2 | 기술 면접관 | `ko-KR-HyunsuNeural` | 기본 |
-| 3 | 임원 면접관 | `ko-KR-InJoonNeural` | rate -6%, pitch -4% |
+| 1 | 따뜻한 인사 담당 | `ko-KR-SunHiNeural` | rate -4%, pitch +2% |
+| 2 | 분석적인 실무 담당 | `ko-KR-HyunsuNeural` | 기본 |
+| 3 | 압박형 임원 담당 | `ko-KR-InJoonNeural` | rate -6%, pitch -4% |
 
 음성은 나이를 직접 보증하는 메타데이터가 아니라 성별이 명시된 서로 다른 한국어 보이스에 속도/피치를 절제해 적용한 캐릭터 연출값이다. 실제 캐릭터와 들어본 뒤 Inspector에서 교체한다.
 

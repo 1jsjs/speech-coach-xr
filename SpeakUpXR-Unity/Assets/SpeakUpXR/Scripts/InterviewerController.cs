@@ -38,6 +38,8 @@ namespace SpeakUpXR
         [Tooltip("Optional mouth transform for non-VRM placeholder characters")]
         public Transform PlaceholderMouth;
         public AudioSource VoiceSource;
+        [Tooltip("Optional Convai exact-speech bridge. When the locally installed Convai package is ready, its Korean voice is used before the existing TTS fallback.")]
+        public ConvaiInterviewerBridge ConvaiBridge;
 
         [Header("TTS / gesture synchronization — editable during Play Mode")]
         [Tooltip("Speaking gesture state, start delay, source start frame and playback speed.")]
@@ -54,8 +56,10 @@ namespace SpeakUpXR
         private Vrm10Instance _vrm;
         private Animator _animator;
         private Transform _neck;
+        private Transform _jaw;
         private Transform _chest;
         private Quaternion _neckBase;
+        private Quaternion _jawBase;
         private Quaternion _chestBase;
         private Vector3 _mouthBaseScale;
         private Vector3 _staticAvatarBasePosition;
@@ -68,17 +72,21 @@ namespace SpeakUpXR
         private float _clock;
         private readonly float[] _samples = new float[128];
         private bool _hasRestrainedHeadLayer;
+        private ConvaiFacialSpeechFallback _facialFallback;
 
         private static readonly int IsSpeakingParameter = Animator.StringToHash("IsSpeaking");
         private static readonly int GestureStyleParameter = Animator.StringToHash("GestureStyle");
         private static readonly int RestrainedHeadState = Animator.StringToHash("Speaking Head.Restrained Head Nod");
 
         public Transform GazePoint => _neck ? _neck : (AvatarRoot ? AvatarRoot.transform : transform);
+        public bool IsSpeaking => _speaking;
 
         private void Awake()
         {
             if (!AvatarRoot && transform.childCount > 0) AvatarRoot = transform.GetChild(0).gameObject;
             if (!VoiceSource) VoiceSource = GetComponent<AudioSource>() ?? gameObject.AddComponent<AudioSource>();
+            if (!ConvaiBridge) ConvaiBridge = GetComponent<ConvaiInterviewerBridge>();
+            _facialFallback = GetComponent<ConvaiFacialSpeechFallback>();
             VoiceSource.spatialBlend = 1f;
             VoiceSource.rolloffMode = AudioRolloffMode.Linear;
             VoiceSource.minDistance = 0.6f;
@@ -99,6 +107,7 @@ namespace SpeakUpXR
                 _animator.cullingMode = AnimatorCullingMode.AlwaysAnimate;
                 _animator.applyRootMotion = false;
                 _neck = _animator.GetBoneTransform(HumanBodyBones.Neck);
+                _jaw = _animator.GetBoneTransform(HumanBodyBones.Jaw);
                 _chest = _animator.GetBoneTransform(HumanBodyBones.Chest) ?? _animator.GetBoneTransform(HumanBodyBones.Spine);
                 if (HasAnimatorParameter(GestureStyleParameter, AnimatorControllerParameterType.Int))
                 {
@@ -118,6 +127,7 @@ namespace SpeakUpXR
                             : "Warm - Sitting Talking";
             }
             if (_neck) _neckBase = _neck.localRotation;
+            if (_jaw) _jawBase = _jaw.localRotation;
             if (_chest) _chestBase = _chest.localRotation;
             if (PlaceholderMouth) _mouthBaseScale = PlaceholderMouth.localScale;
             _nextBlink = UnityEngine.Random.Range(1.5f, 4.5f);
@@ -131,6 +141,19 @@ namespace SpeakUpXR
 
         public IEnumerator Speak(CoachApi api, string text, string tone)
         {
+            if (!_facialFallback) _facialFallback = GetComponent<ConvaiFacialSpeechFallback>();
+            _facialFallback?.SetDialogueExpression(tone, Personality);
+            if (ConvaiBridge && ConvaiBridge.UseConvaiSpeech)
+            {
+                bool spokenByConvai = false;
+                yield return ConvaiBridge.SpeakExact(text, tone, value => spokenByConvai = value);
+                if (spokenByConvai)
+                {
+                    _facialFallback?.ClearDialogueExpression();
+                    yield break;
+                }
+            }
+
             AudioClip clip = null;
             string error = null;
             if (api) yield return api.Synthesize(text, Voice, tone, value => clip = value, value => error = value);
@@ -156,6 +179,7 @@ namespace SpeakUpXR
             float tailEnd = Time.realtimeSinceStartup + GestureTailSeconds;
             while (Time.realtimeSinceStartup < tailEnd) yield return null;
             SetSpeaking(false);
+            _facialFallback?.ClearDialogueExpression();
             if (_animator) _animator.speed = 1f;
             if (VoiceSource) VoiceSource.clip = null;
         }
@@ -163,6 +187,8 @@ namespace SpeakUpXR
         public void StopSpeaking()
         {
             SetSpeaking(false);
+            if (!_facialFallback) _facialFallback = GetComponent<ConvaiFacialSpeechFallback>();
+            _facialFallback?.ClearDialogueExpression();
             if (VoiceSource) VoiceSource.Stop();
             if (_animator) _animator.speed = 1f;
         }
@@ -172,6 +198,27 @@ namespace SpeakUpXR
             _speaking = value;
             if (_animator && HasAnimatorParameter(IsSpeakingParameter, AnimatorControllerParameterType.Bool))
                 _animator.SetBool(IsSpeakingParameter, value);
+        }
+
+        /// <summary>Called by the reflection-safe Convai bridge when remote speech starts or stops.</summary>
+        public void SetExternalSpeaking(bool value)
+        {
+            SetSpeaking(value);
+            if (value) PlaySpeakingGesture();
+            else if (_animator) _animator.speed = 1f;
+        }
+
+        /// <summary>Maps Convai's emotion stream to deliberately restrained interview-panel reactions.</summary>
+        public void ApplyExternalEmotion(string emotion, int intensity)
+        {
+            if (string.IsNullOrWhiteSpace(emotion)) return;
+            string normalized = emotion.Trim().ToLowerInvariant();
+            if (normalized.Contains("joy") || normalized.Contains("happy") || normalized.Contains("approval"))
+                Nod();
+            else if ((normalized.Contains("surprise") || normalized.Contains("curious")) && intensity > 1)
+                _nodTime = 0.12f;
+            if (!_facialFallback) _facialFallback = GetComponent<ConvaiFacialSpeechFallback>();
+            _facialFallback?.SetExternalEmotion(normalized, intensity);
         }
 
         private void PlaySpeakingGesture()
@@ -235,10 +282,18 @@ namespace SpeakUpXR
             }
             if (_neck) _neck.localRotation *= Quaternion.Euler(neckNod, 0f, 0f);
 
-            float mouth = GetMouthWeight();
-            if (_vrm) _vrm.Runtime.Expression.SetWeight(ExpressionKey.Aa, mouth);
-            if (PlaceholderMouth)
-                PlaceholderMouth.localScale = new Vector3(_mouthBaseScale.x, _mouthBaseScale.y * Mathf.Lerp(0.35f, 1.5f, mouth), _mouthBaseScale.z);
+            // Convai applies server-produced visemes directly to the facial blendshapes.
+            // Do not overwrite them with the old amplitude/sine-wave mouth fallback.
+            bool externalFaceAnimation = ConvaiBridge && ConvaiBridge.IsRemoteSpeaking;
+            if (!externalFaceAnimation)
+            {
+                float mouth = GetMouthWeight();
+                if (_vrm) _vrm.Runtime.Expression.SetWeight(ExpressionKey.Aa, mouth);
+                if (_jaw)
+                    _jaw.localRotation = _jawBase * Quaternion.Euler(mouth * 7.5f, 0f, 0f);
+                if (PlaceholderMouth)
+                    PlaceholderMouth.localScale = new Vector3(_mouthBaseScale.x, _mouthBaseScale.y * Mathf.Lerp(0.35f, 1.5f, mouth), _mouthBaseScale.z);
+            }
 
             if (_vrm)
             {
